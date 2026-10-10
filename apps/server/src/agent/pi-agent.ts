@@ -1,10 +1,14 @@
 import { Agent, type AgentEvent, type AgentMessage, type AgentTool, type StreamFn } from "@earendil-works/pi-agent-core";
 import { randomUUID } from "node:crypto";
+import { join, posix } from "node:path";
+import { AgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type FileEntry } from "@earendil-works/pi-coding-agent";
 import {
   createModels,
   createProvider,
   envApiKeyAuth,
+  getCurrentTools,
   normalizeContext,
+  toToolDeclaration,
   type Model,
 } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
@@ -21,6 +25,7 @@ import { createAgentBackend, type AgentBackendResult } from "./backends/index.js
 import type { AgentWorkspace } from "./backends/types.js";
 import { createContextCompactor } from "./context-compaction.js";
 import { discoverLocalSkills } from "./local-skills.js";
+import { createPiWorkspaceTools } from "./pi-workspace-tools.js";
 import { createTaskTool } from "./sub-agents.js";
 import { LOOMIC_SYSTEM_PROMPT } from "./prompts/loomic-main.js";
 import type { AgentPersistence } from "./persistence/index.js";
@@ -90,7 +95,12 @@ export function createLoomicPiAgent(options: Parameters<LoomicAgentFactory>[0]):
   });
   return {
     async *stream(message, context, signal) {
+      if (message.role !== "user") throw new Error("The Pi session requires a user message.");
       const streamFn = options.streamFn ?? models.streamSimple.bind(models);
+      const savedEntries = context.threadId
+        ? await options.persistence?.loadEntries(context.threadId) ?? []
+        : [];
+      const imageReferences = collectGeneratedImageReferences(savedEntries);
       const tools = createMainAgentTools(backend, {
         createUserClient,
         ...(options.brandKitId ? { brandKitId: options.brandKitId } : {}),
@@ -131,11 +141,9 @@ export function createLoomicPiAgent(options: Parameters<LoomicAgentFactory>[0]):
         ...(context.accessToken ? { access_token: context.accessToken } : {}),
         ...(context.canvasId ? { canvas_id: context.canvasId } : {}),
         ...(context.userId ? { user_id: context.userId } : {}),
-        ...(context.attachmentMap ? { user_attachment_map: context.attachmentMap } : {}),
+        user_attachment_map: { ...imageReferences, ...context.attachmentMap },
       });
-      const previousMessages = context.threadId
-        ? await options.persistence?.loadMessages(context.threadId) ?? []
-        : [];
+      const sessionManager = SessionManager.inMemory(backendResult.sandboxDir, undefined, savedEntries);
       const compactContext = createContextCompactor(model.contextWindow, async (prompt, abortSignal) => {
         const summaryStream = await streamFn(model, normalizeContext({
           messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
@@ -150,15 +158,6 @@ export function createLoomicPiAgent(options: Parameters<LoomicAgentFactory>[0]):
         }
         return response.content.filter((part) => part.type === "text").map((part) => part.text).join("");
       });
-      const safeCompactContext: typeof compactContext = async (messages, abortSignal) => {
-        try {
-          return await compactContext(messages, abortSignal);
-        } catch {
-          // Pi context transforms must return a transcript. The provider can then
-          // report a context-limit error through the normal model event path.
-          return messages;
-        }
-      };
       const trace = createAgentTrace(options.env, {
         runId: context.runId ?? randomUUID(),
         sessionId: context.sessionId ?? context.threadId ?? "unknown",
@@ -171,8 +170,15 @@ export function createLoomicPiAgent(options: Parameters<LoomicAgentFactory>[0]):
           : "",
       });
       const tracedStreamFn: StreamFn = (requestModel, requestContext, requestOptions) => {
-        trace.recordModelRequest(requestContext);
-        return streamFn(requestModel, requestContext, requestOptions);
+        // AgentSession can project the initial system prompt without its tool
+        // declarations. Restore the active loadout for this model request.
+        const head = requestContext.messages[0];
+        const activeTools = agent.state.tools;
+        const modelContext = head?.role === "system" && activeTools.length > 0 && getCurrentTools(requestContext.messages).length === 0
+          ? { ...requestContext, messages: [{ ...head, toolsAdded: activeTools.map(toToolDeclaration) }, ...requestContext.messages.slice(1)] }
+          : requestContext;
+        trace.recordModelRequest(modelContext);
+        return streamFn(requestModel, modelContext, requestOptions);
       };
       const events: AgentEvent[] = [];
       let wake: (() => void) | undefined;
@@ -180,51 +186,123 @@ export function createLoomicPiAgent(options: Parameters<LoomicAgentFactory>[0]):
         ? discoverLocalSkills(backendResult.skillsRoot, options.managedSkillNames)
         : [];
       const systemPrompt = buildSystemPrompt(options.brandKitId, options.workspaceSkills, localSkills);
-      const mainTools = [...createFileTools(backend), createTodoTool(), ...tools];
+      const mainTools = [...createPiWorkspaceTools(backend), ...createFileTools(backend), createTodoTool(), ...tools];
+      const allTools = [...mainTools, createTaskTool({
+        model, streamFn: tracedStreamFn, tools: mainTools, systemPrompt, transformContext: compactContext,
+        onEvent(parentToolCallId, event) {
+          if (event.type === "message_start" || event.type === "message_end") trace.record(event, true);
+          if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
+            const nested = { ...event, toolCallId: `${parentToolCallId}:${event.toolCallId}` };
+            trace.record(nested, true);
+            events.push(nested);
+            wake?.();
+          }
+        },
+      })];
       const agent = new Agent({
         initialState: {
           systemPrompt,
           model,
           thinkingLevel: model.reasoning ? "medium" : "off",
-          messages: previousMessages,
-          tools: [...mainTools, createTaskTool({
-            model, streamFn: tracedStreamFn, tools: mainTools, systemPrompt, transformContext: safeCompactContext,
-            onEvent(parentToolCallId, event) {
-              if (event.type === "message_start" || event.type === "message_end") trace.record(event, true);
-              if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
-                const nested = { ...event, toolCallId: `${parentToolCallId}:${event.toolCallId}` };
-                trace.record(nested, true);
-                events.push(nested);
-                wake?.();
-              }
-            },
-          })],
+          messages: sessionManager.buildSessionContext().messages,
+          tools: allTools,
         },
+        // coding-agent's session projection emits compactionSummary entries. Its
+        // converter is private, so render that entry for the model here.
+        convertToLlm: (messages) => messages.flatMap((entry) => {
+          if (entry.role === "compactionSummary") return [{
+            role: "user" as const,
+            content: [{ type: "text" as const, text: `The conversation history before this point was compacted into the following summary:\n\n<summary>\n${entry.summary}\n</summary>` }],
+            timestamp: entry.timestamp,
+          }];
+          return entry.role === "system" || entry.role === "user" || entry.role === "assistant" || entry.role === "toolResult"
+            ? [entry] : [];
+        }),
         streamFn: tracedStreamFn,
-        transformContext: safeCompactContext,
         toolExecution: "sequential",
         ...(model.reasoning && (model.provider === "google" || model.provider === "google-vertex") && model.id.includes("2.5")
           ? { thinkingBudgets: { medium: -1 } }
           : {}),
       });
+      const settingsManager = SettingsManager.inMemory({
+        compaction: {
+          enabled: true,
+          reserveTokens: Math.min(16_384, Math.max(512, Math.floor(model.contextWindow * 0.1))),
+          keepRecentTokens: Math.min(20_000, Math.max(1_024, Math.floor(model.contextWindow * 0.25))),
+        },
+        images: { autoResize: false },
+      });
+      const resourceLoader = new DefaultResourceLoader({
+        cwd: backendResult.sandboxDir,
+        agentDir: backendResult.sandboxDir,
+        settingsManager,
+        noExtensions: true,
+        noSkills: true,
+        noContextFiles: true,
+        noPromptTemplates: true,
+        noThemes: true,
+        systemPrompt,
+      });
+      await resourceLoader.reload();
+      const modelRuntime = await ModelRuntime.create({
+        authPath: join(backendResult.sandboxDir, ".pi-auth.json"),
+        modelsPath: null,
+        refreshOnCreate: false,
+      });
+      const apiKey = options.streamFn ? "injected-stream" : model.provider === "google"
+        ? options.env.googleApiKey ?? process.env.GOOGLE_API_KEY
+        : model.provider === "google-vertex" ? "vertex-runtime"
+          : options.env.openAIApiKey ?? process.env.OPENAI_API_KEY;
+      modelRuntime.registerProvider(model.provider, apiKey ? { apiKey } : {});
+      const session = new AgentSession({
+        agent, sessionManager, settingsManager, resourceLoader, modelRuntime,
+        cwd: backendResult.sandboxDir,
+        baseToolsOverride: Object.fromEntries(allTools.map((tool) => [tool.name, tool])),
+        initialActiveToolNames: allTools.map((tool) => tool.name),
+      });
       let settled = false;
       let failure: unknown;
+      let pendingModelError: AgentEvent | undefined;
+      let savedEntryCount = sessionManager.getEntryCount();
+      const saveSession = async () => {
+        if (!context.threadId || !options.persistence) return;
+        await options.persistence.saveEntries(context.threadId, [sessionManager.getHeader()!, ...sessionManager.getEntries()]);
+        savedEntryCount = sessionManager.getEntryCount();
+      };
       agent.subscribe(async (event) => {
         trace.record(event);
+        if (event.type === "message_end" && event.message.role === "assistant") {
+          if (event.message.stopReason === "error") {
+            pendingModelError = event;
+            return;
+          }
+          pendingModelError = undefined;
+        }
         events.push(event);
         wake?.();
         if (event.type === "turn_end" && context.threadId) {
-          await options.persistence?.saveMessages(context.threadId, agent.state.messages);
+          await saveSession();
         }
       });
-      const onAbort = () => agent.abort();
+      const onAbort = () => { void session.abort(); };
       signal.addEventListener("abort", onAbort, { once: true });
       if (signal.aborted) {
         signal.removeEventListener("abort", onAbort);
+        session.dispose();
         await trace.finish("canceled");
         return;
       }
-      const task = agent.prompt(message).catch((error) => {
+      const input = typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : message.content;
+      const task = session.prompt(input.filter((part) => part.type === "text").map((part) => part.text).join("\n"), {
+        images: input.filter((part) => part.type === "image"),
+        expandPromptTemplates: false,
+      }).then(async () => {
+        if (sessionManager.getEntryCount() !== savedEntryCount) await saveSession();
+        if (pendingModelError) {
+          events.push(pendingModelError);
+          wake?.();
+        }
+      }).catch((error) => {
         failure = error;
       }).finally(() => {
         settled = true;
@@ -244,10 +322,11 @@ export function createLoomicPiAgent(options: Parameters<LoomicAgentFactory>[0]):
       } finally {
         signal.removeEventListener("abort", onAbort);
         if (!settled) {
-          agent.abort();
+          await session.abort();
           await task;
         }
-        await trace.finish(signal.aborted ? "canceled" : failure ? "failed" : "completed");
+        session.dispose();
+        await trace.finish(signal.aborted ? "canceled" : failure || pendingModelError ? "failed" : "completed");
       }
     },
   };
@@ -276,14 +355,21 @@ function createFileTools(backend: AgentWorkspace): AgentTool[] {
   }
   const tools: AgentTool[] = [
     fileTool("ls", "List files and directories", Type.Object({ path: Type.Optional(Type.String()) }), (p) => Promise.resolve(backend.lsInfo((p.path as string | undefined) ?? "/"))),
-    fileTool("read_file", "Read a file with line numbers", Type.Object({ file_path: Type.String(), offset: Type.Optional(Type.Number()), limit: Type.Optional(Type.Number()) }), (p) => Promise.resolve(backend.read(p.file_path as string, p.offset as number | undefined, p.limit as number | undefined))),
-    fileTool("write_file", "Create a file", Type.Object({ file_path: Type.String(), content: Type.Optional(Type.String()) }), (p) => Promise.resolve(backend.write(p.file_path as string, (p.content as string | undefined) ?? ""))),
-    fileTool("edit_file", "Replace text in a file", Type.Object({ file_path: Type.String(), old_string: Type.String(), new_string: Type.String(), replace_all: Type.Optional(Type.Boolean()) }), (p) => Promise.resolve(backend.edit(p.file_path as string, p.old_string as string, p.new_string as string, p.replace_all as boolean | undefined))),
+    fileTool("read_file", "Read a file with line numbers. For a relative Skill reference, pass its source file as base_path.", Type.Object({ file_path: Type.String(), base_path: Type.Optional(Type.String()), offset: Type.Optional(Type.Number()), limit: Type.Optional(Type.Number()) }), (p) => Promise.resolve(backend.read(resolveReadPath(p.file_path as string, p.base_path as string | undefined), p.offset as number | undefined, p.limit as number | undefined))),
     fileTool("glob", "Find files by glob pattern", Type.Object({ pattern: Type.String(), path: Type.Optional(Type.String()) }), (p) => Promise.resolve(backend.globInfo(p.pattern as string, p.path as string | undefined))),
     fileTool("grep", "Search file contents", Type.Object({ pattern: Type.String(), path: Type.Optional(Type.String()), glob: Type.Optional(Type.String()) }), (p) => Promise.resolve(backend.grepRaw(p.pattern as string, p.path as string | undefined, p.glob as string | undefined))),
   ];
-  tools.push(fileTool("execute", "Run a shell command in the isolated sandbox", Type.Object({ command: Type.String() }), (p) => backend.execute(p.command as string)));
   return tools;
+}
+
+function resolveReadPath(filePath: string, basePath?: string): string {
+  if (filePath.startsWith("/")) return filePath;
+  if (!basePath) throw new Error("Relative file paths require base_path set to the referring Skill file.");
+  const match = /^\/(?:workspace-skills|skills)\/[^/]+\//.exec(basePath);
+  if (!match) throw new Error("base_path must be a file inside a Skill directory.");
+  const resolved = posix.resolve(posix.dirname(basePath), filePath);
+  if (!resolved.startsWith(match[0])) throw new Error("Relative path escapes its Skill directory.");
+  return resolved;
 }
 
 function createTodoTool(): AgentTool {
@@ -310,13 +396,11 @@ function buildSystemPrompt(brandKitId?: string | null, skills: WorkspaceSkillEnt
   let prompt = LOOMIC_SYSTEM_PROMPT;
   if (brandKitId) prompt += "\n\n当前项目已绑定品牌套件。在进行设计相关工作时，请先使用 get_brand_kit 工具查询品牌信息，确保设计符合品牌规范。";
   const activeSkills = [
-    ...skills.map((skill) => ({ name: skill.name, path: skill.path, content: skill.content })),
-    ...localSkills.map((skill) => ({ name: skill.name, path: skill.filePath, content: skill.content })),
+    ...skills.map((skill) => ({ name: skill.name, description: skill.description, path: skill.path })),
+    ...localSkills.map((skill) => ({ name: skill.name, description: skill.description, path: skill.filePath })),
   ];
   if (activeSkills.length > 0) {
-    // Pi Agent Core has no Skills middleware. Give it the enabled instructions
-    // directly so a model cannot skip them by omitting a read_file call.
-    prompt += `\n\n## Enabled Skills\nApply each Skill when its task matches. Relative references are resolved from its SKILL.md directory; use read_file for those files.\n${activeSkills.map((skill) => `\n### ${skill.name} (${skill.path})\n${skill.content}`).join("\n")}`;
+    prompt += `\n\n## Available Skills\nWhen a task matches a Skill, read its SKILL.md with read_file before following it. Resolve relative references from the file containing the reference: pass that file as base_path to read_file.\n${activeSkills.map((skill) => `- ${skill.name}: ${skill.description} (${skill.path})`).join("\n")}`;
   }
   return prompt;
 }
@@ -325,6 +409,26 @@ export function createDefaultModelSpecifier(env: Pick<ServerEnv, "agentModel">):
   const model = env.agentModel;
   if (model.includes(":")) return model;
   return model.startsWith("gemini-") ? `google:${model}` : `openai:${model}`;
+}
+
+/** Use server-saved tool results when the model refers to an earlier image. */
+function collectGeneratedImageReferences(entries: FileEntry[]): Record<string, string> {
+  const references: Record<string, string> = {};
+  for (const entry of entries) {
+    if (entry.type !== "message" || entry.message.role !== "toolResult" || entry.message.toolName !== "generate_image") continue;
+    const text = entry.message.content.filter((part) => part.type === "text").map((part) => part.text).join("");
+    try {
+      const result: unknown = JSON.parse(text);
+      if (!result || typeof result !== "object" || !("imageUrl" in result) || typeof result.imageUrl !== "string") continue;
+      const url = new URL(result.imageUrl);
+      if (url.protocol !== "http:" && url.protocol !== "https:") continue;
+      references[`${url.origin}${url.pathname}`] = result.imageUrl;
+      if ("elementId" in result && typeof result.elementId === "string") references[result.elementId] = result.imageUrl;
+    } catch {
+      // Tool failures can be plain text and contain no image reference.
+    }
+  }
+  return references;
 }
 
 function resolveModel(specifier: string, env: ServerEnv): Model<any> {

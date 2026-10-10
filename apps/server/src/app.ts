@@ -127,7 +127,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   registerAllProviders(env);
 
   const app = Fastify({
-    logger: { level: "info" },
+    logger: { level: "info", redact: { paths: ["req.url"] } },
   });
   void app.register(multipart, {
     limits: { fileSize: 10 * 1024 * 1024 },

@@ -14,20 +14,20 @@ describe("Pi persistence", () => {
     expect(createStore).not.toHaveBeenCalled();
   });
 
-  it("loads Pi messages and starts a new thread with an empty transcript", async () => {
-    const messages = [{ role: "user", content: "Current", timestamp: 1 }];
-    const loadMessages = vi.fn().mockResolvedValueOnce(messages).mockResolvedValueOnce(null);
-    const saveMessages = vi.fn();
-    const createStore = vi.fn(() => ({ fileStore: {}, loadMessages, saveMessages })) as unknown as typeof createPiSessionStore;
+  it("loads Pi session entries and starts a new thread with an empty session", async () => {
+    const entries = [{ type: "session", id: "session-1", timestamp: "2026-10-09T00:00:00Z", cwd: "/tmp" }];
+    const loadEntries = vi.fn().mockResolvedValueOnce(entries).mockResolvedValueOnce(null);
+    const saveEntries = vi.fn();
+    const createStore = vi.fn(() => ({ fileStore: {}, loadEntries, saveEntries })) as unknown as typeof createPiSessionStore;
     const service = createAgentPersistenceService({ supabaseDbUrl: "postgres://test" }, {
       createPiSessionStore: createStore,
     });
 
     const persistence = await service.getPersistence();
-    expect(await persistence?.loadMessages("thread-1")).toEqual(messages);
-    expect(await persistence?.loadMessages("thread-2")).toEqual([]);
-    await persistence?.saveMessages("thread-1", messages as never);
-    expect(saveMessages).toHaveBeenCalledWith("thread-1", messages);
+    expect(await persistence?.loadEntries("thread-1")).toEqual(entries);
+    expect(await persistence?.loadEntries("thread-2")).toEqual([]);
+    await persistence?.saveEntries("thread-1", entries as never);
+    expect(saveEntries).toHaveBeenCalledWith("thread-1", entries);
     expect(await service.getPersistence()).toBe(persistence);
     expect(createStore).toHaveBeenCalledOnce();
   });

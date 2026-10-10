@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
@@ -135,6 +135,11 @@ export function createWorkspace(options: {
       const lines = content.split("\n");
       return lines.slice(offset, offset + limit).map((line, index) => `${offset + index + 1}\t${line}`).join("\n");
     },
+    async readRaw(path) {
+      const content = await contents(path);
+      if (content === null) throw new Error(`File not found: ${path}`);
+      return content;
+    },
     async write(path, content) {
       const { route, key } = select(path);
       if (route.readonly) return { error: `Cannot write to read-only path: ${path}` };
@@ -149,6 +154,20 @@ export function createWorkspace(options: {
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "EEXIST") return { error: `File already exists: ${path}` };
         throw error;
+      }
+    },
+    async overwrite(path, content) {
+      const { route, key } = select(path);
+      if (route.readonly) throw new Error(`Cannot write to read-only path: ${path}`);
+      if (route.kind === "store") await options.fileStore!.put(route.namespace, key, content);
+      else {
+        const full = await localPath(route.root, key, true);
+        try {
+          if ((await lstat(full)).isSymbolicLink()) throw new Error(`Cannot write through a symlink: ${path}`);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+        await writeFile(full, content);
       }
     },
     async edit(path, oldString, newString, replaceAll = false) {
@@ -183,7 +202,7 @@ export function createWorkspace(options: {
       }
       return matches;
     },
-    async execute(command) {
+    async execute(command, executionOptions) {
       const env = {
         PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
         HOME: sandboxRoot,
@@ -192,7 +211,8 @@ export function createWorkspace(options: {
       };
       try {
         const { stdout, stderr } = await execFileAsync("/bin/sh", ["-lc", command], {
-          cwd: sandboxRoot, env, timeout: 120_000, maxBuffer: 200_000,
+          cwd: sandboxRoot, env, timeout: Math.min(executionOptions?.timeoutMs ?? 120_000, 120_000),
+          signal: executionOptions?.signal, maxBuffer: 200_000,
         });
         return { output: `${stdout}${stderr}`, exitCode: 0, truncated: false };
       } catch (error) {

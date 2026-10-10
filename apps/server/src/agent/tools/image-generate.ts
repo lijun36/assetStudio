@@ -161,13 +161,21 @@ export async function runImageGenerate(
     console.log(`[generate_image] ${label} +${Date.now() - t0}ms`, extra ? JSON.stringify(extra) : "");
   };
 
-  // Resolve assetId references in inputImages to base64 data URIs
+  // Resolve attachment IDs and prior generated URLs from server-owned values.
+  // Models may reproduce a signed URL's path while corrupting its long token.
   if (input.inputImages?.length && attachmentMap) {
     input = {
       ...input,
-      inputImages: input.inputImages.map((ref) =>
-        attachmentMap[ref] ?? ref,
-      ),
+      inputImages: input.inputImages.map((ref) => {
+        if (Object.hasOwn(attachmentMap, ref) && typeof attachmentMap[ref] === "string") return attachmentMap[ref];
+        if (!ref.startsWith("http://") && !ref.startsWith("https://")) return ref;
+        try {
+          const url = new URL(ref);
+          return attachmentMap[`${url.origin}${url.pathname}`] ?? ref;
+        } catch {
+          return ref;
+        }
+      }),
     };
   }
 

@@ -1,6 +1,6 @@
 ---
 name: canvas-design
-description: Create beautiful visual art as .png and .pdf files using design philosophy. Use when the user asks to create a poster, visual artwork, design piece, or static visual output via code generation. Requires the execute tool and Python with Pillow/reportlab.
+description: Create beautiful visual art as .png and .pdf files using design philosophy. Use when the user asks to create a poster, visual artwork, design piece, or static visual output via code generation. Requires the bash tool and Python with Pillow/reportlab.
 license: Apache-2.0
 metadata:
   author: anthropic
@@ -16,7 +16,7 @@ Output .md (philosophy) + .pdf or .png (artwork) files.
 ## Prerequisites
 
 This skill requires:
-- The `execute` tool (sandbox code execution)
+- The `bash` tool (sandbox code execution)
 - Python 3 with `Pillow` and `reportlab` installed
 - Font files available at the path in `$FONT_DIR` environment variable
 
@@ -49,12 +49,12 @@ Create a VISUAL PHILOSOPHY (not layouts or templates) that will be interpreted t
 
 ## Step 2: Canvas Creation
 
-Use the `execute` tool to run Python code that generates the artwork.
+Use the `bash` tool to run Python code that generates the artwork.
 
 ### IMPORTANT: Path Rules
 
-**虚拟路径 vs 真实路径**：`ls` 和 `read_file` 工具使用虚拟路径（如 `/skills/...`），
-但 `execute` 工具运行在真实 shell 中。Python 代码里**必须使用真实路径**。
+**虚拟路径 vs 真实路径**：`ls` 和 `read` 工具使用虚拟路径（如 `/skills/...`），
+但 `bash` 工具运行在真实 shell 中。Python 代码里**必须使用真实路径**。
 
 规则：
 1. **字体路径**：永远用 `os.environ["FONT_DIR"]`，不要硬编码
@@ -112,16 +112,16 @@ Write a complete Python script, then execute it.
 **所有路径必须用相对路径**（多用户并发时绝对路径会冲突）：
 
 ```
-1. write_file path="generate.py"       ← 相对路径，不要用 /tmp/xxx
-2. execute: python3 generate.py
+1. write path="generate.py"       ← 相对路径，不要用 /tmp/xxx
+2. bash: python3 generate.py
 3. Output: img.save("output.png")      ← 相对路径
-4. execute: pwd                        ← 获取当前工作目录的完整路径
+4. bash: pwd                        ← 获取当前工作目录的完整路径
 5. persist_sandbox_file filePath="{pwd输出}/output.png"
 ```
 
 **禁止使用绝对路径写文件**：
-- ❌ `write_file path="/tmp/script.py"` — 多用户会覆盖
-- ✅ `write_file path="script.py"` — 每个用户独立沙箱
+- ❌ `write path="/tmp/script.py"` — 此虚拟路径不会指向 shell 的 /tmp
+- ✅ `write path="script.py"` — 每个用户独立沙箱
 
 **Critical**: In Python scripts:
 - Use `os.environ["FONT_DIR"]` for font paths（唯一允许的绝对路径）

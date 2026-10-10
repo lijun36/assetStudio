@@ -28,6 +28,7 @@ describe("workspace Skill catalog", () => {
 
     expect(await loadWorkspaceSkills(client, "canvas-1")).toEqual({
       managedNames: ["active", "disabled"],
+      localDiscoverySafe: true,
       enabled: [{
         name: "active", description: "Active", path: "/workspace-skills/active/SKILL.md",
         content: "Use this.", files: [{ path: "references/guide.md", content: "Guide" }],
@@ -54,6 +55,35 @@ describe("workspace Skill catalog", () => {
     expect(await loadWorkspaceSkills(client, "canvas-1")).toEqual({
       enabled: [],
       managedNames: ["json-image-prompt"],
+      localDiscoverySafe: true,
+    });
+  });
+
+  it("keeps enabled Skills when the optional system catalog query fails", async () => {
+    const client = {
+      from(table: string) {
+        if (table === "canvases") return {
+          select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { project: { workspace_id: "workspace-1" } } }) }) }),
+        };
+        if (table === "workspace_skills") return {
+          select: () => ({ eq: async () => ({ data: [
+            { enabled: true, skill: { id: "skill-1", slug: "active", description: "Active", skill_content: "Use this." } },
+          ], error: null }) }),
+        };
+        if (table === "skills") return {
+          select: () => ({ eq: async () => ({ data: null, error: new Error("catalog unavailable") }) }),
+        };
+        if (table === "skill_files") return {
+          select: () => ({ in: async () => ({ data: [] }) }),
+        };
+        throw new Error(`Unexpected table: ${table}`);
+      },
+    } as unknown as UserSupabaseClient;
+
+    expect(await loadWorkspaceSkills(client, "canvas-1")).toMatchObject({
+      localDiscoverySafe: false,
+      managedNames: ["active"],
+      enabled: [{ name: "active", content: "Use this." }],
     });
   });
 });

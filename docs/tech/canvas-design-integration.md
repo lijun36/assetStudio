@@ -22,9 +22,10 @@ LOOMIC_SKILLS_ROOT=../../skills
 2. Open a project in the web UI
 3. Send message: "帮我生成一张极简主义风格的海报"
 4. Verify:
-   - Agent prompt contains enabled `canvas-design` instructions and its `SKILL.md` path
+   - Agent prompt lists the enabled `canvas-design` name, description, and `SKILL.md` path
+   - Agent reads `SKILL.md` before applying its instructions
    - Agent uses `read_file` for any referenced files in that Skill
-   - Agent calls `execute` tool with Python code
+   - Agent calls `bash` tool with Python code
    - Generated PNG appears in sandbox tmpdir
    - Agent calls `persist_sandbox_file` to upload
    - User receives downloadable URL
@@ -41,7 +42,7 @@ The Dockerfile handles everything:
 
 | Issue | Cause | Fix |
 |-------|-------|-----|
-| `execute` tool not available | Backend not sandbox | Check `LOOMIC_AGENT_BACKEND_MODE=state` and backend factory returns LocalShellBackend |
+| `bash` tool not available | Agent tool registration failed | Check Pi workspace tool registration and sandbox setup |
 | Fonts not found | Wrong FONT_DIR | Check `LOOMIC_SKILLS_ROOT` env var |
 | Sandbox dir fills up | Cleanup failed | Check runtime.ts finally block; add cron cleanup as safety net |
 | Python not found | Not in Docker image | Rebuild Docker image |
@@ -50,7 +51,8 @@ The Dockerfile handles everything:
 ### Adding New Skills
 
 Place new skills in `skills/<skill-name>/SKILL.md` with `name` and `description`
-frontmatter. Pi scans the configured directory on the next Agent run, advertises
-the metadata, and includes enabled instructions in the Agent prompt. Referenced files
-remain available through `read_file`. Skills
+frontmatter. Pi scans the configured directory on the next Agent run and advertises
+only the enabled metadata. The Agent reads matching `SKILL.md` files on demand.
+For relative references, pass the referring Skill file as `base_path` to `read_file`;
+the path stays inside that Skill's directory. Skills
 registered in the workspace database follow that workspace's enable setting.

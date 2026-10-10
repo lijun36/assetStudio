@@ -1,8 +1,8 @@
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { basename, dirname, relative, resolve, sep } from "node:path";
 import { loadSkillsFromDir, type Skill } from "@earendil-works/pi-coding-agent";
 
-export type LocalSkill = Skill & { content: string };
+export type LocalSkill = Skill;
 
 /** Discover only the configured server skill directory, never a host user's global skills. */
 export function discoverLocalSkills(skillsRoot: string, managedNames: readonly string[] = []): LocalSkill[] {
@@ -17,6 +17,6 @@ export function discoverLocalSkills(skillsRoot: string, managedNames: readonly s
     const realFile = realpathSync(skill.filePath);
     if (!realFile.startsWith(`${realRoot}${sep}`)) return [];
     const virtualPath = `/skills/${relative(root, skill.filePath).split(sep).join("/")}`;
-    return [{ ...skill, filePath: virtualPath, baseDir: dirname(virtualPath), content: readFileSync(realFile, "utf8") }];
+    return [{ ...skill, filePath: virtualPath, baseDir: dirname(virtualPath) }];
   });
 }

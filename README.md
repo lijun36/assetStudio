@@ -170,7 +170,7 @@ Agent 的作用是把一句话变成可检查、可继续修改的画布操作�
 - **Node.js** >= 20
 - **pnpm** >= 10 (`npm install -g pnpm`)
 - **Supabase CLI** (`brew install supabase/tap/supabase`)
-- A [Supabase](https://supabase.com) project (free tier works)
+- A local Supabase instance or a [Supabase](https://supabase.com) project (free tier works)
 - At least one AI API key (Google or OpenAI)
 
 ### 1. Clone & Install
@@ -191,6 +191,8 @@ supabase db push
 ```
 
 This creates all required tables, RLS policies, storage buckets, and the PGMQ job queue.
+
+For local development, run `supabase start` and use its local URL and keys in `.env.local`. Then run the local login initialization in step 4.
 
 ### 3. Configure Environment
 
@@ -233,7 +235,19 @@ Google sign-in needs separate OAuth credentials; `GOOGLE_API_KEY` is only for AI
 
 > **Note**: See [Environment Variables Reference](#environment-variables-reference) for the full list.
 
-### 4. Seed Test Accounts (optional)
+### 4. Initialize the local login
+
+After applying migrations and setting `.env.local` to your **local** Supabase instance, run:
+
+```bash
+pnpm seed:local-admin
+```
+
+This creates or updates `admin@loomic.test` in Supabase Auth with password `admin123`. The Auth trigger creates its profile and personal workspace in PostgreSQL. The command checks that workspace and can be run again after a local database reset. It refuses a non-local Supabase URL, so this fixed password is not seeded into a hosted project.
+
+Sign in at [http://localhost:3000/login](http://localhost:3000/login) with that **email** and password. The login form uses email addresses, so enter `admin@loomic.test` rather than `admin`.
+
+### 5. Seed Test Accounts (optional)
 
 自部署后，跑一下种子脚本就能直接体验各套餐功能，不需要接支付：
 
@@ -254,7 +268,7 @@ pnpm seed
 
 Use **password sign-in** on `/login` for these accounts. The login-link option only works for an email account that already exists; use `/register` to create a new account.
 
-### 5. Start Development
+### 6. Start Development
 
 ```bash
 pnpm dev

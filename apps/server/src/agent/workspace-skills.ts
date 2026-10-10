@@ -30,6 +30,8 @@ export interface WorkspaceSkillCatalog {
   enabled: WorkspaceSkillEntry[];
   /** Names controlled by the registry, including disabled or uninstalled system skills. */
   managedNames: string[];
+  /** Local discovery is safe only after the full system Skill catalog loads. */
+  localDiscoverySafe: boolean;
 }
 
 /**
@@ -61,16 +63,26 @@ export async function loadWorkspaceSkills(
 
   // Catalog-managed system skills must stay hidden from local discovery even
   // after a workspace uninstalls one of them.
-  const { data: systemRows, error: systemError } = await (userClient as any)
-    .from("skills")
-    .select("slug")
-    .eq("source", "system");
-  if (systemError) throw systemError;
+  let systemNames: string[] = [];
+  let localDiscoverySafe = true;
+  try {
+    const { data, error: systemError } = await (userClient as any)
+      .from("skills")
+      .select("slug")
+      .eq("source", "system");
+    if (systemError) throw systemError;
+    systemNames = (data ?? []).map((row: { slug: string }) => row.slug);
+  } catch (error) {
+    // Keep the enabled DB Skills, but do not discover local system Skills when
+    // their disabled/uninstalled names cannot be verified.
+    localDiscoverySafe = false;
+    console.warn("[workspace-skills] System Skill catalog unavailable:", error instanceof Error ? error.message : error);
+  }
 
   const managedNames = ((rows ?? []) as Array<{ skill: { slug?: string } | null }>)
     .map((row) => row.skill?.slug)
     .filter((name): name is string => typeof name === "string");
-  managedNames.push(...(systemRows ?? []).map((row: { slug: string }) => row.slug));
+  managedNames.push(...systemNames);
   const enabledRows = ((rows ?? []) as Array<{ enabled: boolean; skill: Record<string, unknown> | null }>)
     .filter((row) => row.enabled);
 
@@ -117,7 +129,7 @@ export async function loadWorkspaceSkills(
       };
     })
     .filter((entry): entry is WorkspaceSkillEntry => entry !== null);
-  return { enabled, managedNames };
+  return { enabled, managedNames, localDiscoverySafe };
 }
 
 /**

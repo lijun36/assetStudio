@@ -1,12 +1,12 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { FileEntry } from "@earendil-works/pi-coding-agent";
 
 import type { ServerEnv } from "../../config/env.js";
 import { createPiSessionStore } from "./pi-session-store.js";
 
 export type AgentPersistence = {
   fileStore: ReturnType<typeof createPiSessionStore>["fileStore"];
-  loadMessages(threadId: string): Promise<AgentMessage[]>;
-  saveMessages(threadId: string, messages: AgentMessage[]): Promise<void>;
+  loadEntries(threadId: string): Promise<FileEntry[]>;
+  saveEntries(threadId: string, entries: FileEntry[]): Promise<void>;
 };
 
 export type AgentPersistenceService = {
@@ -28,10 +28,10 @@ export function createAgentPersistenceService(
         const store = (overrides?.createPiSessionStore ?? createPiSessionStore)(env.supabaseDbUrl);
         persistence = {
           fileStore: store.fileStore,
-          async loadMessages(threadId) {
-            return await store.loadMessages(threadId) ?? [];
+          async loadEntries(threadId) {
+            return await store.loadEntries(threadId) ?? [];
           },
-          saveMessages: store.saveMessages,
+          saveEntries: store.saveEntries,
         };
       }
       return persistence;

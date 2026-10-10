@@ -67,7 +67,7 @@ export async function fetchAsBase64(
     throw new GenerationError(
       providerName,
       "input_fetch_error",
-      `Failed to fetch input (HTTP ${response.status}): ${url}`,
+      `Failed to fetch input (HTTP ${response.status})`,
     );
   }
 

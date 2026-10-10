@@ -863,7 +863,7 @@ export function createAgentRunService(options: CreateAgentRuntimeOptions) {
           const catalog = await loadWorkspaceSkills(wsClient, run.canvasId);
           workspaceSkills = catalog.enabled;
           managedSkillNames = catalog.managedNames;
-          discoverLocalSkills = true;
+          discoverLocalSkills = catalog.localDiscoverySafe;
           rlog.lap("workspace_skills_loaded", { count: workspaceSkills.length });
         } catch (err) {
           // Non-fatal: agent runs without workspace skills

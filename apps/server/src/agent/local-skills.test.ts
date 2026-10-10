@@ -24,5 +24,7 @@ describe("Pi skill discovery", () => {
     expect(skills.map((skill) => ({ name: skill.name, filePath: skill.filePath }))).toEqual([
       { name: "new-skill", filePath: "/skills/new-skill/SKILL.md" },
     ]);
+    expect(skills[0]?.description).toBe("Use new-skill for design.");
+    expect(skills[0]).not.toHaveProperty("content");
   });
 });

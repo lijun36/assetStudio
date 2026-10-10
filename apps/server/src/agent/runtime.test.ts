@@ -9,6 +9,7 @@ import { createAgentRunService } from "./runtime.js";
 
 const roots: string[] = [];
 afterEach(async () => {
+  vi.unstubAllGlobals();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -82,5 +83,55 @@ describe("agent run service with Pi", () => {
       expect.objectContaining({ attachmentMap: { "asset-1": "data:image/png;base64,YWJj" } }),
       expect.any(AbortSignal),
     );
+  });
+
+  it("downloads a remote reference before exposing it to the model and image tool", async () => {
+    const root = await mkdtemp(join(tmpdir(), "loomic-pi-remote-image-"));
+    roots.push(root);
+    const fetchImage = vi.fn().mockResolvedValue(new Response(new Uint8Array([1, 2, 3]), {
+      headers: { "content-type": "image/png" },
+    }));
+    vi.stubGlobal("fetch", fetchImage);
+    const stream = vi.fn(async function* () {});
+    const service = createAgentRunService({
+      env: { agentBackendMode: "filesystem", agentFilesRoot: root, skillsRoot: join(root, "skills"), agentModel: "gpt-4.1" } as ServerEnv,
+      agentFactory: () => ({ stream }),
+      runIdFactory: () => "run-remote-image",
+    });
+    service.createRun({
+      sessionId: "session-1", conversationId: "conversation-1", prompt: "Edit this image",
+      attachments: [{ assetId: "asset-1", url: "https://assets.example/reference.png", mimeType: "image/png" }],
+    });
+
+    const events = [];
+    for await (const event of service.streamRun("run-remote-image")) events.push(event);
+    expect(fetchImage).toHaveBeenCalledWith("https://assets.example/reference.png");
+    expect(stream).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.arrayContaining([{ type: "image", data: "AQID", mimeType: "image/png" }]) }),
+      expect.objectContaining({ attachmentMap: { "asset-1": "data:image/png;base64,AQID" } }),
+      expect.any(AbortSignal),
+    );
+    expect(events.at(-1)?.type).toBe("run.completed");
+  });
+
+  it("fails before calling the model when a reference image cannot be downloaded", async () => {
+    const root = await mkdtemp(join(tmpdir(), "loomic-pi-missing-image-"));
+    roots.push(root);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("expired", { status: 403 })));
+    const stream = vi.fn(async function* () {});
+    const service = createAgentRunService({
+      env: { agentBackendMode: "filesystem", agentFilesRoot: root, skillsRoot: join(root, "skills"), agentModel: "gpt-4.1" } as ServerEnv,
+      agentFactory: () => ({ stream }),
+      runIdFactory: () => "run-missing-image",
+    });
+    service.createRun({
+      sessionId: "session-1", conversationId: "conversation-1", prompt: "Edit this image",
+      attachments: [{ assetId: "asset-1", url: "https://assets.example/expired.png", mimeType: "image/png" }],
+    });
+
+    const events = [];
+    for await (const event of service.streamRun("run-missing-image")) events.push(event);
+    expect(stream).not.toHaveBeenCalled();
+    expect(events.at(-1)).toMatchObject({ type: "run.failed", error: { code: "run_failed" } });
   });
 });
